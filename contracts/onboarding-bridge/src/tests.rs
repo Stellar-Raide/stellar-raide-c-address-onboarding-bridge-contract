@@ -326,7 +326,6 @@ fn test_pause_and_unpause() {
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_fund_c_address_paused() {
     let env = Env::default();
     let (admin, user, fee_collector) = create_test_users(&env);
@@ -339,11 +338,13 @@ fn test_fund_c_address_paused() {
     bridge.pause();
 
     let target = Address::generate(&env);
-    bridge.fund_c_address(&user, &target, &token_id, &500i128);
+    assert_eq!(
+        bridge.try_fund_c_address(&user, &target, &token_id, &500i128),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_batch_fund_paused() {
     let env = Env::default();
     let (admin, user, fee_collector) = create_test_users(&env);
@@ -358,11 +359,13 @@ fn test_batch_fund_paused() {
     let target = Address::generate(&env);
     let targets = Vec::from_array(&env, [target.clone()]);
     let amounts = Vec::from_array(&env, [500i128]);
-    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+    assert_eq!(
+        bridge.try_batch_fund_c_address(&user, &targets, &amounts, &token_id),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_withdraw_fees_paused() {
     let env = Env::default();
     let (admin, user, fee_collector) = create_test_users(&env);
@@ -376,11 +379,13 @@ fn test_withdraw_fees_paused() {
     bridge.fund_c_address(&user, &target, &token_id, &500i128);
     bridge.pause();
 
-    bridge.withdraw_fees(&token_id, &5i128);
+    assert_eq!(
+        bridge.try_withdraw_fees(&token_id, &5i128),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_set_fee_bps_paused() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
@@ -389,11 +394,13 @@ fn test_set_fee_bps_paused() {
 
     bridge.initialize(&admin, &fee_collector, &50u32);
     bridge.pause();
-    bridge.set_fee_bps(&100u32);
+    assert_eq!(
+        bridge.try_set_fee_bps(&100u32),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_set_fee_collector_paused() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
@@ -402,11 +409,13 @@ fn test_set_fee_collector_paused() {
 
     bridge.initialize(&admin, &fee_collector, &50u32);
     bridge.pause();
-    bridge.set_fee_collector(&Address::generate(&env));
+    assert_eq!(
+        bridge.try_set_fee_collector(&Address::generate(&env)),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
-#[should_panic(expected = "contract is paused")]
 fn test_set_admin_paused() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
@@ -415,7 +424,10 @@ fn test_set_admin_paused() {
 
     bridge.initialize(&admin, &fee_collector, &50u32);
     bridge.pause();
-    bridge.set_admin(&Address::generate(&env));
+    assert_eq!(
+        bridge.try_set_admin(&Address::generate(&env)),
+        Err(Ok(BridgeError::ContractPaused))
+    );
 }
 
 #[test]
