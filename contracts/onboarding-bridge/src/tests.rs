@@ -1,4 +1,4 @@
-use crate::OnboardingBridge;
+use crate::{BridgeError, OnboardingBridge};
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
@@ -55,7 +55,6 @@ fn test_initialize() {
 }
 
 #[test]
-#[should_panic(expected = "already initialized")]
 fn test_initialize_twice() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
@@ -63,18 +62,23 @@ fn test_initialize_twice() {
     let bridge = create_bridge_client(&env, &bridge_id);
 
     bridge.initialize(&admin, &fee_collector, &50u32);
-    bridge.initialize(&admin, &fee_collector, &50u32);
+    assert_eq!(
+        bridge.try_initialize(&admin, &fee_collector, &50u32),
+        Err(Ok(BridgeError::AlreadyInitialized))
+    );
 }
 
 #[test]
-#[should_panic(expected = "fee too high")]
 fn test_initialize_fee_too_high() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
     let (bridge_id, _) = register_all_contracts(&env);
     let bridge = create_bridge_client(&env, &bridge_id);
 
-    bridge.initialize(&admin, &fee_collector, &2000u32);
+    assert_eq!(
+        bridge.try_initialize(&admin, &fee_collector, &2000u32),
+        Err(Ok(BridgeError::FeeTooHigh))
+    );
 }
 
 #[test]
@@ -98,7 +102,6 @@ fn test_fund_c_address() {
 }
 
 #[test]
-#[should_panic(expected = "not initialized")]
 fn test_fund_without_initialize() {
     let env = Env::default();
     let (_admin, user, _fee_collector) = create_test_users(&env);
@@ -110,7 +113,10 @@ fn test_fund_without_initialize() {
     let b2_id = env.register(OnboardingBridge, ());
     let b2 = crate::OnboardingBridgeClient::new(&env, &b2_id);
     let target = Address::generate(&env);
-    b2.fund_c_address(&user, &target, &token_id, &100i128);
+    assert_eq!(
+        b2.try_fund_c_address(&user, &target, &token_id, &100i128),
+        Err(Ok(BridgeError::NotInitialized))
+    );
 }
 
 #[test]
@@ -173,7 +179,6 @@ fn test_set_fee_bps() {
 }
 
 #[test]
-#[should_panic(expected = "fee too high")]
 fn test_set_fee_bps_too_high() {
     let env = Env::default();
     let (admin, _user, fee_collector) = create_test_users(&env);
@@ -181,7 +186,10 @@ fn test_set_fee_bps_too_high() {
     let bridge = create_bridge_client(&env, &bridge_id);
 
     bridge.initialize(&admin, &fee_collector, &50u32);
-    bridge.set_fee_bps(&2000u32);
+    assert_eq!(
+        bridge.try_set_fee_bps(&2000u32),
+        Err(Ok(BridgeError::FeeTooHigh))
+    );
 }
 
 #[test]
@@ -286,12 +294,14 @@ fn test_fund_events() {
 }
 
 #[test]
-#[should_panic(expected = "not initialized")]
 fn test_query_fee_bps_uninitialized() {
     let env = Env::default();
     let (bridge_id, _) = register_all_contracts(&env);
     let bridge = create_bridge_client(&env, &bridge_id);
-    bridge.query_fee_bps();
+    assert_eq!(
+        bridge.try_query_fee_bps(),
+        Err(Ok(BridgeError::NotInitialized))
+    );
 }
 
 /********** Minimal Test Token **********/
