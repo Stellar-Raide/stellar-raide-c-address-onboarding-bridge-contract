@@ -220,11 +220,15 @@ impl OnboardingBridge {
         }
         source.require_auth();
 
+        let min_amount = read_min_amount(&env);
         let mut total: i128 = 0;
         for i in 0..targets.len() {
             let amount = amounts.get(i).unwrap();
             if amount <= 0 {
                 return Err(BridgeError::InvalidAmount);
+            }
+            if amount < min_amount {
+                return Err(BridgeError::BelowMinimum);
             }
             total += amount;
         }
@@ -316,6 +320,18 @@ impl OnboardingBridge {
     pub fn query_admin(env: Env) -> Result<Address, BridgeError> {
         check_initialized(&env)?;
         Ok(read_admin(&env))
+    }
+
+    pub fn set_minimum_amount(env: Env, min_amount: i128) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::MinAmount, &min_amount);
+        Ok(())
+    }
+
+    pub fn query_minimum_amount(env: Env) -> i128 {
+        read_min_amount(&env)
     }
 
     pub fn query_balance(env: Env, c_address: Address, asset: Address) -> i128 {
