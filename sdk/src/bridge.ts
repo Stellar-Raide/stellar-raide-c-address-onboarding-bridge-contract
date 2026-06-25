@@ -3,6 +3,7 @@ import {
   FundCOptions,
   BatchFundCOptions,
   WithdrawFeesOptions,
+  UpgradeOptions,
   TransactionResult,
 } from './types';
 import {
@@ -15,7 +16,6 @@ import {
   scValToNative,
   TransactionBuilder,
   BASE_FEE,
-  Networks,
 } from '@stellar/stellar-sdk';
 
 export class OnboardingBridgeSDK {
@@ -240,6 +240,23 @@ export class OnboardingBridgeSDK {
   }
 
   /**
+   * Get the fee balance held by the contract for a given asset.
+   */
+  async getFeeBalance(asset: string): Promise<string> {
+    const result = await this.provider
+      .simulateTransaction(
+        this.buildSimulationTx('query_fee_balance', [asset]),
+      );
+
+    if ('error' in result && result.error) {
+      throw new Error(`Failed to get fee balance: ${result.error}`);
+    }
+
+    const scVal = (result as any).results?.[0]?.retval;
+    return scVal ? scValToNative(scVal).toString() : '0';
+  }
+
+  /**
    * Check if the bridge contract is initialized.
    */
   async isInitialized(): Promise<boolean> {
@@ -386,6 +403,51 @@ export class OnboardingBridgeSDK {
   }
 
   /**
+   * Upgrade the contract to a new wasm implementation (admin only).
+   * The new_wasm_hash must reference wasm already uploaded to the network.
+   * Preserves all instance storage (admin, fee settings, etc.).
+   */
+  async upgrade(
+    options: UpgradeOptions,
+    adminKeypair: any,
+  ): Promise<TransactionResult> {
+    try {
+      const adminAccount = await this.provider.getAccount(
+        adminKeypair.publicKey(),
+      );
+
+      const wasmHashBytes = Buffer.from(options.newWasmHash, 'hex');
+      const wasmHashScVal = xdr.ScVal.scvBytes(wasmHashBytes);
+
+      const tx = new TransactionBuilder(adminAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call('upgrade', wasmHashScVal),
+        )
+        .setTimeout(30)
+        .build();
+
+      const preparedTx = await this.provider.prepareTransaction(tx);
+      preparedTx.sign(adminKeypair);
+
+      const response = await this.provider.sendTransaction(preparedTx);
+
+      return {
+        hash: response.hash,
+        status: response.status === 'PENDING' ? 'success' : 'pending',
+      };
+    } catch (error: any) {
+      return {
+        hash: '',
+        status: 'failed',
+        error: error.message || 'Unknown error',
+      };
+    }
+  }
+
+  /**
    * Convert JavaScript values to Soroban SCVals.
    */
   private toScVals(args: any[]): xdr.ScVal[] {
@@ -408,6 +470,9 @@ export class OnboardingBridgeSDK {
     if (typeof arg === 'string') {
       if (arg.startsWith('C') || arg.startsWith('G')) {
         return new Address(arg).toScVal();
+      }
+      if (/^\d+$/.test(arg)) {
+        return nativeToScVal(BigInt(arg), { type: 'i128' });
       }
       return nativeToScVal(arg, { type: 'string' });
     }
