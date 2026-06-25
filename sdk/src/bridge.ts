@@ -3,7 +3,7 @@ import {
   FundCOptions,
   BatchFundCOptions,
   WithdrawFeesOptions,
-  ReclaimTokensOptions,
+  UpgradeOptions,
   TransactionResult,
 } from './types';
 import {
@@ -284,6 +284,23 @@ export class OnboardingBridgeSDK {
   }
 
   /**
+   * Get the fee balance held by the contract for a given asset.
+   */
+  async getFeeBalance(asset: string): Promise<string> {
+    const result = await this.provider
+      .simulateTransaction(
+        this.buildSimulationTx('query_fee_balance', [asset]),
+      );
+
+    if ('error' in result && result.error) {
+      throw new Error(`Failed to get fee balance: ${result.error}`);
+    }
+
+    const scVal = (result as any).results?.[0]?.retval;
+    return scVal ? scValToNative(scVal).toString() : '0';
+  }
+
+  /**
    * Check if the bridge contract is initialized.
    */
   async isInitialized(): Promise<boolean> {
@@ -419,6 +436,51 @@ export class OnboardingBridgeSDK {
       return {
         hash: response.hash,
         status: response.status === 'ERROR' ? 'failed' : 'pending',
+      };
+    } catch (error: any) {
+      return {
+        hash: '',
+        status: 'failed',
+        error: error.message || 'Unknown error',
+      };
+    }
+  }
+
+  /**
+   * Upgrade the contract to a new wasm implementation (admin only).
+   * The new_wasm_hash must reference wasm already uploaded to the network.
+   * Preserves all instance storage (admin, fee settings, etc.).
+   */
+  async upgrade(
+    options: UpgradeOptions,
+    adminKeypair: any,
+  ): Promise<TransactionResult> {
+    try {
+      const adminAccount = await this.provider.getAccount(
+        adminKeypair.publicKey(),
+      );
+
+      const wasmHashBytes = Buffer.from(options.newWasmHash, 'hex');
+      const wasmHashScVal = xdr.ScVal.scvBytes(wasmHashBytes);
+
+      const tx = new TransactionBuilder(adminAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          this.contract.call('upgrade', wasmHashScVal),
+        )
+        .setTimeout(30)
+        .build();
+
+      const preparedTx = await this.provider.prepareTransaction(tx);
+      preparedTx.sign(adminKeypair);
+
+      const response = await this.provider.sendTransaction(preparedTx);
+
+      return {
+        hash: response.hash,
+        status: response.status === 'PENDING' ? 'success' : 'pending',
       };
     } catch (error: any) {
       return {

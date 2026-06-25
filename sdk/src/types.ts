@@ -38,13 +38,9 @@ export interface WithdrawFeesOptions {
   amount: string;
 }
 
-export interface ReclaimTokensOptions {
-  /** Asset contract address to reclaim */
-  asset: string;
-  /** Amount to reclaim */
-  amount: string;
-  /** Destination address to receive the reclaimed tokens */
-  to: string;
+export interface UpgradeOptions {
+  /** New wasm hash (32-byte hex string) to upgrade the contract to */
+  newWasmHash: string;
 }
 
 export interface OffRampConfig {
