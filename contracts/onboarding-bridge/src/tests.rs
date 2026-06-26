@@ -981,3 +981,92 @@ impl TestToken {
             .set(&(TDataKey::Balance, to), &(to_bal + amount));
     }
 }
+
+/********** Batch Atomicity Tests (Issue #14) **********/
+
+#[test]
+fn test_batch_partial_success_blocked_address() {
+    let env = Env::default();
+    let (bridge, user, token_id, _admin) = setup_bridge(&env);
+    
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    
+    bridge.add_to_blocklist(&t2);
+    
+    let targets = Vec::from_array(&env, [t1.clone(), t2.clone()]);
+    let amounts = Vec::from_array(&env, [200i128, 300i128]);
+    
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+    
+    assert_eq!(check_balance(&env, &token_id, &t1), 200i128);
+    assert_eq!(check_balance(&env, &token_id, &t2), 0i128);
+    assert_eq!(check_balance(&env, &token_id, &user), 800i128);
+}
+
+#[test]
+fn test_batch_refund_on_mixed_failures() {
+    let env = Env::default();
+    let (bridge, user, token_id, _admin) = setup_bridge(&env);
+    
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    let t3 = Address::generate(&env);
+    
+    bridge.add_to_blocklist(&t2);
+    
+    let targets = Vec::from_array(&env, [t1.clone(), t2.clone(), t3.clone()]);
+    let amounts = Vec::from_array(&env, [100i128, 200i128, 150i128]);
+    
+    let user_before = check_balance(&env, &token_id, &user);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+    
+    let user_after = check_balance(&env, &token_id, &user);
+    let total_sent = 100 + 200 + 150;
+    let refunded = 200;
+    
+    assert_eq!(check_balance(&env, &token_id, &t1), 100i128);
+    assert_eq!(check_balance(&env, &token_id, &t2), 0i128);
+    assert_eq!(check_balance(&env, &token_id, &t3), 150i128);
+    assert_eq!(user_before - user_after, total_sent - refunded);
+}
+
+#[test]
+fn test_batch_completed_event_emitted() {
+    let env = Env::default();
+    let (bridge, user, token_id, _admin) = setup_bridge(&env);
+    
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    
+    bridge.add_to_blocklist(&t2);
+    
+    let targets = Vec::from_array(&env, [t1, t2]);
+    let amounts = Vec::from_array(&env, [100i128, 200i128]);
+    
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+    
+    let events = env.events().all();
+    let (contract_id, _topics, _data) = &events.get(events.len() - 1).unwrap();
+    assert_eq!(contract_id, &bridge.address);
+}
+
+#[test]
+fn test_batch_all_succeed_no_refund() {
+    let env = Env::default();
+    let (bridge, user, token_id, _admin) = setup_bridge(&env);
+    
+    let t1 = Address::generate(&env);
+    let t2 = Address::generate(&env);
+    
+    let targets = Vec::from_array(&env, [t1.clone(), t2.clone()]);
+    let amounts = Vec::from_array(&env, [300i128, 400i128]);
+    
+    let user_before = check_balance(&env, &token_id, &user);
+    bridge.batch_fund_c_address(&user, &targets, &amounts, &token_id);
+    let user_after = check_balance(&env, &token_id, &user);
+    
+    assert_eq!(check_balance(&env, &token_id, &t1), 300i128);
+    assert_eq!(check_balance(&env, &token_id, &t2), 400i128);
+    assert_eq!(user_before - user_after, 700i128);
+}

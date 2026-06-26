@@ -17,6 +17,7 @@ pub enum BridgeError {
     AddressNotAllowlisted = 8,
     InsufficientReclaimable = 9,
     AssetNotWhitelisted = 10,
+    DailyLimitExceeded = 11,
 }
 
 #[contracttype]
@@ -31,6 +32,9 @@ pub enum DataKey {
     AllowlistMode,
     AccruedFees(Address),
     AssetWhitelist,
+    SourceDailyLimit(Address, Address),
+    SourceDailyUsage(Address, Address),
+    AssetFeeCap(Address),
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -176,6 +180,69 @@ fn decrement_accrued_fees(env: &Env, asset: &Address, amount: i128) {
         .set(&DataKey::AccruedFees(asset.clone()), &(current - amount));
 }
 
+fn save_source_daily_limit(env: &Env, source: &Address, asset: &Address, limit: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::SourceDailyLimit(source.clone(), asset.clone()), &limit);
+}
+
+fn read_source_daily_limit(env: &Env, source: &Address, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SourceDailyLimit(source.clone(), asset.clone()))
+        .unwrap_or(i128::MAX)
+}
+
+fn read_source_daily_usage(env: &Env, source: &Address, asset: &Address) -> (i128, u64) {
+    env.storage()
+        .persistent()
+        .get(&DataKey::SourceDailyUsage(source.clone(), asset.clone()))
+        .unwrap_or((0, 0))
+}
+
+fn save_source_daily_usage(env: &Env, source: &Address, asset: &Address, amount: i128, timestamp: u64) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::SourceDailyUsage(source.clone(), asset.clone()), &(amount, timestamp));
+}
+
+fn check_daily_limit(env: &Env, source: &Address, asset: &Address, amount: i128) -> Result<(), BridgeError> {
+    let limit = read_source_daily_limit(env, source, asset);
+    let (current_usage, last_ts) = read_source_daily_usage(env, source, asset);
+    let now = env.ledger().timestamp();
+    
+    let usage = if now - last_ts >= 86400 {
+        0
+    } else {
+        current_usage
+    };
+    
+    if usage + amount > limit {
+        return Err(BridgeError::DailyLimitExceeded);
+    }
+    
+    save_source_daily_usage(env, source, asset, usage + amount, now);
+    Ok(())
+}
+
+fn save_asset_fee_cap(env: &Env, asset: &Address, fee_bps: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::AssetFeeCap(asset.clone()), &fee_bps);
+}
+
+fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AssetFeeCap(asset.clone()))
+        .unwrap_or(MAX_FEE_BPS)
+}
+
+fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+    let asset_cap = read_asset_fee_cap(env, asset);
+    std::cmp::min(global_fee_bps, asset_cap)
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -270,24 +337,47 @@ impl OnboardingBridge {
 
         let fee_bps = read_fee_bps(&env);
         let contract_addr = env.current_contract_address();
+        let mut num_success = 0u32;
+        let mut num_failures = 0u32;
+        let mut refund_amount = 0i128;
 
         for i in 0..targets.len() {
             let target = targets.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
-            check_access(&env, &target)?;
-            let fee = calculate_fee(amount, fee_bps);
+            
+            let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
+            let fee = calculate_fee(amount, effective_fee_bps);
             let net_amount = amount - fee;
+
+            if check_access(&env, &target).is_err() {
+                num_failures += 1;
+                refund_amount += amount;
+                env.events().publish(
+                    ("BatchTransferFailed", source.clone(), target.clone()),
+                    (amount, "access_denied"),
+                );
+                continue;
+            }
 
             if net_amount > 0 {
                 token_client.transfer(&contract_addr, &target, &net_amount);
             }
-
+            num_success += 1;
             increment_accrued_fees(&env, &asset, fee);
             env.events().publish(
                 ("CAddressFunded", source.clone(), target),
                 (amount, fee, asset.clone()),
             );
         }
+
+        if refund_amount > 0 {
+            token_client.transfer(&contract_addr, &source, &refund_amount);
+        }
+
+        env.events().publish(
+            ("BatchCompleted", source),
+            (num_success, num_failures),
+        );
         Ok(())
     }
 
