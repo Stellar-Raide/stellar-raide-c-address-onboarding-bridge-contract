@@ -5,6 +5,18 @@ use soroban_sdk::{
     Val, Vec,
 };
 
+#[cfg(target_family = "wasm")]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    core::arch::wasm32::unreachable()
+}
+
+#[cfg(target_family = "wasm")]
+#[alloc_error_handler]
+fn alloc_error(_: core::alloc::Layout) -> ! {
+    core::arch::wasm32::unreachable()
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BridgeError {
@@ -67,18 +79,22 @@ pub struct TimelockEntry {
     pub claimed: bool,
 }
 
+#[inline(never)]
 fn save_admin(env: &Env, admin: &Address) {
     env.storage().instance().set(&DataKey::Admin, admin);
 }
 
+#[inline(never)]
 fn read_admin(env: &Env) -> Address {
     env.storage().instance().get(&DataKey::Admin).unwrap()
 }
 
+#[inline(never)]
 fn save_fee_collector(env: &Env, addr: &Address) {
     env.storage().instance().set(&DataKey::FeeCollector, addr);
 }
 
+#[inline(never)]
 fn read_fee_collector(env: &Env) -> Address {
     env.storage()
         .instance()
@@ -122,10 +138,12 @@ fn mark_initialized(env: &Env) {
     env.storage().instance().set(&DataKey::Initialized, &true);
 }
 
+#[inline(never)]
 fn save_minimum_amount(env: &Env, amount: &i128) {
     let _ = (env, amount);
 }
 
+#[inline(never)]
 fn read_minimum_amount(env: &Env) -> i128 {
     let _ = env;
     0
@@ -208,6 +226,7 @@ fn check_access(env: &Env, target: &Address) -> Result<(), BridgeError> {
     Ok(())
 }
 
+#[inline(never)]
 fn read_whitelist(env: &Env) -> Map<Address, bool> {
     env.storage()
         .instance()
@@ -215,6 +234,7 @@ fn read_whitelist(env: &Env) -> Map<Address, bool> {
         .unwrap_or_else(|| Map::new(env))
 }
 
+#[inline(never)]
 fn save_whitelist(env: &Env, whitelist: &Map<Address, bool>) {
     env.storage()
         .instance()
@@ -1477,6 +1497,95 @@ impl OnboardingBridge {
 
     pub fn query_timelocked(env: Env, id: u64) -> Result<TimelockEntry, BridgeError> {
         read_timelock_entry(&env, id).ok_or(BridgeError::TimelockNotFound)
+    }
+
+    // --- TTL Management ---
+
+    pub fn extend_instance_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let max_ttl = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        let threshold = max_ttl / 4;
+        env.storage().instance().extend_ttl(threshold, max_ttl);
+        env.events()
+            .publish(("InstanceTtlExtended",), (admin, max_ttl));
+        Ok(())
+    }
+
+    pub fn extend_persistent_ttl(
+        env: Env,
+        key_asset: Address,
+        ttl: u32,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let max_ttl = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        let threshold = max_ttl / 4;
+        let keys = [
+            DataKey::AccruedFees(key_asset.clone()),
+            DataKey::TotalBridged(key_asset.clone()),
+            DataKey::TotalFeesCollected(key_asset.clone()),
+        ];
+        for key in keys.iter() {
+            if env.storage().persistent().has(key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(key, threshold, max_ttl);
+            }
+        }
+        env.events()
+            .publish(("PersistentTtlExtended",), (admin, key_asset, max_ttl));
+        Ok(())
+    }
+
+    pub fn set_max_instance_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let capped = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInstanceTtl, &capped);
+        Ok(())
+    }
+
+    pub fn set_max_persistent_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let capped = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPersistentTtl, &capped);
+        Ok(())
+    }
+
+    pub fn query_ttl_config(env: Env) -> Result<(u32, u32, u32, u32), BridgeError> {
+        check_initialized(&env)?;
+        Ok((
+            read_max_instance_ttl(&env),
+            read_max_persistent_ttl(&env),
+            MAX_ALLOWED_TTL,
+            CRITICAL_ENTRY_TTL_THRESHOLD,
+        ))
     }
 }
 
