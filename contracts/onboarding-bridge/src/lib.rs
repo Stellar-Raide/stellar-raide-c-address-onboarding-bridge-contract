@@ -150,8 +150,19 @@ fn check_not_paused(env: &Env) -> Result<(), BridgeError> {
     Ok(())
 }
 
+#[inline(always)]
 fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
-    (amount * fee_bps as i128) / FEE_DENOMINATOR
+    if fee_bps == 0 {
+        return 0;
+    }
+    let bps = fee_bps as i128;
+    // Use checked arithmetic to guard against overflow on very large amounts.
+    // If checked_mul overflows i128 (amount > ~1.7e38 / 1000), fall back to
+    // dividing first at the cost of minor precision loss.
+    match amount.checked_mul(bps) {
+        Some(product) => product / FEE_DENOMINATOR,
+        None => (amount / FEE_DENOMINATOR) * bps,
+    }
 }
 
 fn is_blocked(env: &Env, addr: &Address) -> bool {
@@ -288,7 +299,11 @@ fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
         .unwrap_or(MAX_FEE_BPS)
 }
 
-fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+#[inline(always)]
+fn get_effective_fee_bps_legacy(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+    if global_fee_bps == 0 {
+        return 0;
+    }
     let cap = read_asset_fee_cap(env, asset);
     if global_fee_bps < cap { global_fee_bps } else { cap }
 }
@@ -466,8 +481,11 @@ fn read_asset_fee_cap(env: &Env, asset: &Address) -> u32 {
         .unwrap_or(MAX_FEE_BPS)
 }
 
-/// Returns the effective fee bps for an asset, capped by its per-asset fee cap.
+#[inline(always)]
 fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32 {
+    if global_fee_bps == 0 {
+        return 0;
+    }
     let cap = read_asset_fee_cap(env, asset);
     global_fee_bps.min(cap)
 }
