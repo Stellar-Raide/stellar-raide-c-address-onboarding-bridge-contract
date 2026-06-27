@@ -507,17 +507,23 @@ impl OnboardingBridge {
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(&source, &env.current_contract_address(), &total);
 
+        // Cache effective fee bps once — same asset for entire batch
         let fee_bps = read_fee_bps(&env);
+        let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
         let contract_addr = env.current_contract_address();
         let mut num_success = 0u32;
         let mut num_failures = 0u32;
         let mut refund_amount = 0i128;
+        let mut total_fees = 0i128;
+        let mut total_bridged = 0i128;
+
+        // Aggregate net amounts per target to combine transfers to the same address
+        let mut aggregated: Map<Address, i128> = Map::new(&env);
 
         for i in 0..targets.len() {
             let target = targets.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
-            
-            let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
+
             let fee = calculate_fee(amount, effective_fee_bps);
             let net_amount = amount - fee;
 
@@ -531,17 +537,36 @@ impl OnboardingBridge {
                 continue;
             }
 
-            if net_amount > 0 {
-                token_client.transfer(&contract_addr, &target, &net_amount);
-            }
             num_success += 1;
-            increment_accrued_fees(&env, &asset, fee);
-            increment_total_bridged(&env, &asset, net_amount);
-            increment_total_fees_collected(&env, &asset, fee);
+            total_fees += fee;
+            total_bridged += net_amount;
+
+            if net_amount > 0 {
+                let existing = aggregated.get(target.clone()).unwrap_or(0);
+                aggregated.set(target.clone(), existing + net_amount);
+            }
+
             env.events().publish(
                 ("CAddressFunded", source.clone(), target),
                 (amount, fee, asset.clone()),
             );
+        }
+
+        // Execute one transfer per unique target instead of N
+        for target_addr in aggregated.keys() {
+            let combined_amount = aggregated.get(target_addr.clone()).unwrap();
+            if combined_amount > 0 {
+                token_client.transfer(&contract_addr, &target_addr, &combined_amount);
+            }
+        }
+
+        // Batch-update fee and bridged counters once instead of per-entry
+        if total_fees > 0 {
+            increment_accrued_fees(&env, &asset, total_fees);
+            increment_total_fees_collected(&env, &asset, total_fees);
+        }
+        if total_bridged > 0 {
+            increment_total_bridged(&env, &asset, total_bridged);
         }
 
         if refund_amount > 0 {
