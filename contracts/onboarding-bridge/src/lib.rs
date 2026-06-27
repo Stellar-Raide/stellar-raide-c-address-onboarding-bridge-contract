@@ -52,12 +52,19 @@ pub enum DataKey {
     SourceDailyLimit(Address, Address),
     AssetFeeCap(Address),
     Nonce(Address),
+    MaxInstanceTtl,
+    MaxPersistentTtl,
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
 const FEE_DENOMINATOR: i128 = 10_000;
 const DEFAULT_PAGE_LIMIT: u32 = 50;
 const MAX_PAGE_LIMIT: u32 = 200;
+
+const DEFAULT_INSTANCE_TTL: u32 = 518_400;
+const DEFAULT_PERSISTENT_TTL: u32 = 518_400;
+const MAX_ALLOWED_TTL: u32 = 3_110_400;
+const CRITICAL_ENTRY_TTL_THRESHOLD: u32 = 129_600;
 
 #[inline(never)]
 fn save_admin(env: &Env, admin: &Address) {
@@ -418,6 +425,42 @@ fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32
     global_fee_bps.min(cap)
 }
 
+#[inline(never)]
+fn read_max_instance_ttl(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxInstanceTtl)
+        .unwrap_or(DEFAULT_INSTANCE_TTL)
+}
+
+#[inline(never)]
+fn read_max_persistent_ttl(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxPersistentTtl)
+        .unwrap_or(DEFAULT_PERSISTENT_TTL)
+}
+
+#[inline(never)]
+fn auto_extend_instance_ttl(env: &Env) {
+    let max_ttl = read_max_instance_ttl(env);
+    let threshold = max_ttl / 4;
+    env.storage()
+        .instance()
+        .extend_ttl(threshold, max_ttl);
+}
+
+#[inline(never)]
+fn auto_extend_persistent_entry(env: &Env, key: &DataKey) {
+    let max_ttl = read_max_persistent_ttl(env);
+    let threshold = max_ttl / 4;
+    if env.storage().persistent().has(key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, threshold, max_ttl);
+    }
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -487,6 +530,12 @@ impl OnboardingBridge {
         increment_accrued_fees(&env, &asset, fee);
         increment_total_bridged(&env, &asset, net_amount);
         increment_total_fees_collected(&env, &asset, fee);
+
+        auto_extend_instance_ttl(&env);
+        auto_extend_persistent_entry(&env, &DataKey::AccruedFees(asset.clone()));
+        auto_extend_persistent_entry(&env, &DataKey::TotalBridged(asset.clone()));
+        auto_extend_persistent_entry(&env, &DataKey::TotalFeesCollected(asset.clone()));
+
         env.events()
             .publish(("CAddressFunded", source, target), (amount, fee, asset));
         Ok(())
@@ -1264,6 +1313,95 @@ impl OnboardingBridge {
 
     pub fn query_timelocked(env: Env, id: u64) -> Result<TimelockEntry, BridgeError> {
         read_timelock_entry(&env, id).ok_or(BridgeError::TimelockNotFound)
+    }
+
+    // --- TTL Management ---
+
+    pub fn extend_instance_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let max_ttl = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        let threshold = max_ttl / 4;
+        env.storage().instance().extend_ttl(threshold, max_ttl);
+        env.events()
+            .publish(("InstanceTtlExtended",), (admin, max_ttl));
+        Ok(())
+    }
+
+    pub fn extend_persistent_ttl(
+        env: Env,
+        key_asset: Address,
+        ttl: u32,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let max_ttl = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        let threshold = max_ttl / 4;
+        let keys = [
+            DataKey::AccruedFees(key_asset.clone()),
+            DataKey::TotalBridged(key_asset.clone()),
+            DataKey::TotalFeesCollected(key_asset.clone()),
+        ];
+        for key in keys.iter() {
+            if env.storage().persistent().has(key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(key, threshold, max_ttl);
+            }
+        }
+        env.events()
+            .publish(("PersistentTtlExtended",), (admin, key_asset, max_ttl));
+        Ok(())
+    }
+
+    pub fn set_max_instance_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let capped = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxInstanceTtl, &capped);
+        Ok(())
+    }
+
+    pub fn set_max_persistent_ttl(env: Env, ttl: u32) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        let capped = if ttl > MAX_ALLOWED_TTL {
+            MAX_ALLOWED_TTL
+        } else {
+            ttl
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxPersistentTtl, &capped);
+        Ok(())
+    }
+
+    pub fn query_ttl_config(env: Env) -> Result<(u32, u32, u32, u32), BridgeError> {
+        check_initialized(&env)?;
+        Ok((
+            read_max_instance_ttl(&env),
+            read_max_persistent_ttl(&env),
+            MAX_ALLOWED_TTL,
+            CRITICAL_ENTRY_TTL_THRESHOLD,
+        ))
     }
 }
 
