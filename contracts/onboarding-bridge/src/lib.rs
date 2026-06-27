@@ -21,6 +21,7 @@ pub enum BridgeError {
 
     DuplicateNonce = 12,
     TransactionExpired = 13,
+    LoyaltyTokenNotSet = 14,
 }
 
 #[contracttype]
@@ -40,6 +41,8 @@ pub enum DataKey {
     SourceDailyLimit(Address, Address),
     AssetFeeCap(Address),
     Nonce(Address),
+    LoyaltyToken,
+    LoyaltyAmountPerFund,
 }
 
 const MAX_FEE_BPS: u32 = 1_000;
@@ -395,6 +398,39 @@ fn get_effective_fee_bps(env: &Env, asset: &Address, global_fee_bps: u32) -> u32
     global_fee_bps.min(cap)
 }
 
+// --- Loyalty token helpers ---
+
+fn save_loyalty_token(env: &Env, token: &Address) {
+    env.storage().instance().set(&DataKey::LoyaltyToken, token);
+}
+
+fn read_loyalty_token(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::LoyaltyToken)
+}
+
+fn save_loyalty_amount_per_fund(env: &Env, amount: &i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LoyaltyAmountPerFund, amount);
+}
+
+fn read_loyalty_amount_per_fund(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::LoyaltyAmountPerFund)
+        .unwrap_or(0)
+}
+
+fn mint_loyalty_tokens(env: &Env, recipient: &Address) {
+    if let Some(loyalty_token) = read_loyalty_token(env) {
+        let amount = read_loyalty_amount_per_fund(env);
+        if amount > 0 {
+            let token_client = token::Client::new(env, &loyalty_token);
+            token_client.transfer(&env.current_contract_address(), recipient, &amount);
+        }
+    }
+}
+
 #[contract]
 pub struct OnboardingBridge;
 
@@ -464,6 +500,9 @@ impl OnboardingBridge {
         increment_accrued_fees(&env, &asset, fee);
         increment_total_bridged(&env, &asset, net_amount);
         increment_total_fees_collected(&env, &asset, fee);
+
+        mint_loyalty_tokens(&env, &source);
+
         env.events()
             .publish(("CAddressFunded", source, target), (amount, fee, asset));
         Ok(())
@@ -909,6 +948,33 @@ impl OnboardingBridge {
     pub fn query_whitelisted_assets(env: Env) -> Result<Vec<Address>, BridgeError> {
         check_initialized(&env)?;
         Ok(read_whitelist(&env).keys())
+    }
+
+    // --- Loyalty Token ---
+
+    pub fn set_loyalty_token(
+        env: Env,
+        token: Address,
+        amount_per_fund: i128,
+    ) -> Result<(), BridgeError> {
+        check_initialized(&env)?;
+        let admin = read_admin(&env);
+        admin.require_auth();
+        if amount_per_fund < 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        save_loyalty_token(&env, &token);
+        save_loyalty_amount_per_fund(&env, &amount_per_fund);
+        env.events()
+            .publish(("LoyaltyTokenSet", admin), (token, amount_per_fund));
+        Ok(())
+    }
+
+    pub fn query_loyalty_token(env: Env) -> Result<(Address, i128), BridgeError> {
+        check_initialized(&env)?;
+        let token = read_loyalty_token(&env).ok_or(BridgeError::LoyaltyTokenNotSet)?;
+        let amount = read_loyalty_amount_per_fund(&env);
+        Ok((token, amount))
     }
 
     // --- Cross-chain Onboarding ---
