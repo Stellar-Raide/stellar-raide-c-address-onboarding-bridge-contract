@@ -47,7 +47,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Map,
+    Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,8 @@ pub enum BridgeError {
     UpgradeTimelockActive = 27,
     // Issue #23: max withdraw per tx
     WithdrawExceedsLimit = 28,
+    /// An arithmetic operation overflowed i128 bounds.
+    Overflow = 29,
 }
 
 // ---------------------------------------------------------------------------
@@ -518,18 +521,13 @@ fn check_not_paused(env: &Env) -> Result<(), BridgeError> {
 }
 
 #[inline(always)]
-fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
+fn calculate_fee(amount: i128, fee_bps: u32) -> Result<i128, BridgeError> {
     if fee_bps == 0 {
-        return 0;
+        return Ok(0);
     }
     let bps = fee_bps as i128;
-    // Use checked arithmetic to guard against overflow on very large amounts.
-    // If checked_mul overflows i128 (amount > ~1.7e38 / 1000), fall back to
-    // dividing first at the cost of minor precision loss.
-    match amount.checked_mul(bps) {
-        Some(product) => product / FEE_DENOMINATOR,
-        None => (amount / FEE_DENOMINATOR) * bps,
-    }
+    let product = safe_math::safe_mul(amount, bps)?;
+    safe_math::safe_div(product, FEE_DENOMINATOR)
 }
 
 fn is_blocked(env: &Env, addr: &Address) -> bool {
@@ -983,6 +981,34 @@ fn mint_loyalty_tokens(env: &Env, recipient: &Address) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Overflow-safe arithmetic (issue #26)
+// ---------------------------------------------------------------------------
+
+mod safe_math {
+    use super::BridgeError;
+
+    #[inline(always)]
+    pub fn safe_add(a: i128, b: i128) -> Result<i128, BridgeError> {
+        a.checked_add(b).ok_or(BridgeError::Overflow)
+    }
+
+    #[inline(always)]
+    pub fn safe_sub(a: i128, b: i128) -> Result<i128, BridgeError> {
+        a.checked_sub(b).ok_or(BridgeError::Overflow)
+    }
+
+    #[inline(always)]
+    pub fn safe_mul(a: i128, b: i128) -> Result<i128, BridgeError> {
+        a.checked_mul(b).ok_or(BridgeError::Overflow)
+    }
+
+    #[inline(always)]
+    pub fn safe_div(a: i128, b: i128) -> Result<i128, BridgeError> {
+        a.checked_div(b).ok_or(BridgeError::Overflow)
+    }
+}
+
 struct ReentrancyGuard {
     env: Env,
 }
@@ -1182,8 +1208,8 @@ impl OnboardingBridge {
         let global_fee_bps = read_fee_bps(&env);
         let tiered_fee_bps = get_tiered_fee_bps(&env, &source, global_fee_bps);
         let effective_fee_bps = get_effective_fee_bps(&env, &asset, tiered_fee_bps);
-        let fee = calculate_fee(amount, effective_fee_bps);
-        let net_amount = amount - fee;
+        let fee = calculate_fee(amount, effective_fee_bps)?;
+        let net_amount = safe_math::safe_sub(amount, fee)?;
 
         if net_amount > 0 {
             token_client.transfer(&contract_addr, &target, &net_amount);
@@ -1293,7 +1319,7 @@ impl OnboardingBridge {
             if amount <= 0 {
                 return Err(BridgeError::InvalidAmount);
             }
-            total += amount;
+            total = safe_math::safe_add(total, amount)?;
         }
 
         let token_client = token::Client::new(&env, &asset);
@@ -1315,8 +1341,8 @@ impl OnboardingBridge {
             let target = targets.get(i).unwrap();
             let amount = amounts.get(i).unwrap();
 
-            let fee = calculate_fee(amount, effective_fee_bps);
-            let net_amount = amount - fee;
+            let fee = calculate_fee(amount, effective_fee_bps)?;
+            let net_amount = safe_math::safe_sub(amount, fee)?;
 
             if check_access(&env, &target).is_err() {
                 num_failures += 1;
@@ -1935,8 +1961,8 @@ impl OnboardingBridge {
 
         let global_fee_bps = read_fee_bps(&env);
         let effective_fee_bps = get_effective_fee_bps(&env, &asset, global_fee_bps);
-        let fee = calculate_fee(amount, effective_fee_bps);
-        let net_amount = amount - fee;
+        let fee = calculate_fee(amount, effective_fee_bps)?;
+        let net_amount = safe_math::safe_sub(amount, fee)?;
 
         if net_amount > 0 {
             token_client.transfer(&env.current_contract_address(), &target, &net_amount);
@@ -1945,7 +1971,7 @@ impl OnboardingBridge {
         // Split fee: referral portion goes directly to referrer
         let referral_fee = if let Some(ref referrer_addr) = referrer {
             let referral_rate = read_referral_rate(&env);
-            let rf = (fee * referral_rate as i128) / FEE_DENOMINATOR;
+            let rf = safe_math::safe_div(safe_math::safe_mul(fee, referral_rate as i128)?, FEE_DENOMINATOR)?;
             if rf > 0 {
                 token_client.transfer(&env.current_contract_address(), referrer_addr, &rf);
                 env.events().publish(
@@ -2095,11 +2121,11 @@ impl OnboardingBridge {
     /// // assert_eq!(fee, 10i128);
     /// // assert_eq!(net, 990i128);
     /// ```
-    pub fn query_calculate_fee(env: Env, gross_amount: i128) -> (i128, i128) {
+    pub fn query_calculate_fee(env: Env, gross_amount: i128) -> Result<(i128, i128), BridgeError> {
         let fee_bps = read_fee_bps(&env);
-        let fee = calculate_fee(gross_amount, fee_bps);
-        let net = gross_amount - fee;
-        (fee, net)
+        let fee = calculate_fee(gross_amount, fee_bps)?;
+        let net = safe_math::safe_sub(gross_amount, fee)?;
+        Ok((fee, net))
     }
 
     /// Returns the cumulative net amount of `asset` that has been delivered to
@@ -3116,8 +3142,8 @@ impl OnboardingBridge {
 
         let fee_bps = read_fee_bps(&env);
         let effective_fee_bps = get_effective_fee_bps(&env, &asset, fee_bps);
-        let fee = calculate_fee(amount, effective_fee_bps);
-        let net_amount = amount - fee;
+        let fee = calculate_fee(amount, effective_fee_bps)?;
+        let net_amount = safe_math::safe_sub(amount, fee)?;
 
         let token_client = token::Client::new(&env, &asset);
         if net_amount > 0 {
@@ -3398,8 +3424,8 @@ impl OnboardingBridge {
 
         let fee_bps = read_fee_bps(&env);
         let effective_fee_bps = get_effective_fee_bps(&env, &entry.asset, fee_bps);
-        let fee = calculate_fee(entry.amount, effective_fee_bps);
-        let net_amount = entry.amount - fee;
+        let fee = calculate_fee(entry.amount, effective_fee_bps)?;
+        let net_amount = safe_math::safe_sub(entry.amount, fee)?;
 
         let token_client = token::Client::new(&env, &entry.asset);
         if net_amount > 0 {
