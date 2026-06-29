@@ -1224,7 +1224,7 @@ impl OnboardingBridge {
         mint_loyalty_tokens(&env, &source);
 
         env.events()
-            .publish(("CAddressFunded", source, target), (amount, fee, asset));
+            .publish(("CAddressFunded", asset, source, target), (amount, fee));
         Ok(())
     }
 
@@ -1364,8 +1364,8 @@ impl OnboardingBridge {
             }
 
             env.events().publish(
-                ("CAddressFunded", source.clone(), target),
-                (amount, fee, asset.clone()),
+                ("CAddressFunded", asset.clone(), source.clone(), target),
+                (amount, fee),
             );
         }
 
@@ -1990,8 +1990,8 @@ impl OnboardingBridge {
         increment_total_fees_collected(&env, &asset, fee);
 
         env.events().publish(
-            ("CAddressFunded", source, target),
-            (amount, fee, asset),
+            ("CAddressFunded", asset, source, target),
+            (amount, fee),
         );
         Ok(())
     }
