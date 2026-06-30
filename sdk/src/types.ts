@@ -57,8 +57,70 @@ export interface OffRampConfig {
   moonpayApiKey?: string;
   /** Your Transak API key */
   transakApiKey?: string;
+  /** Your Ramp API key */
+  rampApiKey?: string;
+  /** Your Banxa API key */
+  banxaApiKey?: string;
   /** Whether to use sandbox/test environment */
   testMode?: boolean;
+}
+
+export type OffRampProvider = 'moonpay' | 'transak' | 'ramp' | 'banxa';
+
+export interface ProviderConfig {
+  /** Provider name */
+  provider: OffRampProvider;
+  /** List of supported crypto assets */
+  supportedAssets: string[];
+  /** List of supported fiat currencies */
+  supportedFiatCurrencies: string[];
+  /** List of supported countries (ISO 3166-1 alpha-2 codes) */
+  supportedCountries: string[];
+  /** Minimum transaction amount in fiat */
+  minAmount: string;
+  /** Maximum transaction amount in fiat */
+  maxAmount: string;
+  /** Fee percentage (e.g., "2.5" for 2.5%) */
+  feePercentage: string;
+  /** Whether provider is available in test mode */
+  testModeAvailable: boolean;
+}
+
+export interface ProviderComparison {
+  /** Total fee amount for the transaction */
+  feeAmount: string;
+  /** Fee as a percentage */
+  feePercentage: string;
+  /** Net amount after fees */
+  netAmount: string;
+  /** Time to receive funds (in hours, approximate) */
+  settlementTime: number;
+}
+
+export interface OnRampUrlParams {
+  /** Provider to use */
+  provider: OffRampProvider;
+  /** Amount in fiat currency */
+  amount: string;
+  /** Fiat currency code (e.g., 'USD', 'EUR') */
+  fiatCurrency: string;
+  /** Crypto asset (e.g., 'XLM', 'USDC') */
+  asset: string;
+  /** Target C-address to receive funds */
+  cAddress: string;
+}
+
+export interface OffRampUrlParams {
+  /** Provider to use */
+  provider: OffRampProvider;
+  /** Amount in crypto to sell */
+  amount: string;
+  /** Crypto asset (e.g., 'XLM', 'USDC') */
+  asset: string;
+  /** Fiat currency to receive (e.g., 'USD', 'EUR') */
+  fiatCurrency: string;
+  /** Source G-address to send crypto from */
+  gAddress: string;
 }
 
 export interface TransactionResult {
