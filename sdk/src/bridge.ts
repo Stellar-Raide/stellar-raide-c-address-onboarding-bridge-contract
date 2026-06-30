@@ -15,6 +15,7 @@ import {
   PaginationOptions,
 } from './types';
 import { assertAccountAddress, assertContractAddress } from './validate';
+import { withRpcRetry } from './retry';
 import {
   SorobanRpc,
   Contract,
@@ -38,7 +39,13 @@ export class OnboardingBridgeSDK {
     assertContractAddress(config.contractId, 'contractId');
     this.config = config;
     this.contract = new Contract(config.contractId);
-    this.provider = new SorobanRpc.Server(config.rpcUrl);
+    // Wrap the provider so every RPC call automatically retries transient
+    // failures (network/timeout/rate-limit) with exponential backoff + jitter.
+    // Reads use an aggressive policy; writes use a conservative one (see retry.ts).
+    this.provider = withRpcRetry(
+      new SorobanRpc.Server(config.rpcUrl),
+      config.retry,
+    );
     this.networkPassphrase = config.networkPassphrase;
   }
 
