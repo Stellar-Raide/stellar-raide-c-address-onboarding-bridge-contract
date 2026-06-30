@@ -1,892 +1,461 @@
 /**
- * Event subscription for the OnboardingBridge Soroban contract.
+ * Issue #57: SDK Event Subscription Support
  *
- * Polls `getEvents` on the Soroban RPC on a configurable interval and delivers
- * typed, parsed event payloads to registered listeners.
+ * Provides a polling-based event subscriber for the OnboardingBridge contract.
  *
- * ## Usage
- *
+ * Usage:
  * ```ts
- * const emitter = new BridgeEventEmitter({
- *   contractId: 'C...',
- *   rpcUrl: 'https://soroban-testnet.stellar.org',
- *   networkPassphrase: Networks.TESTNET,
- * });
+ * const sub = new EventSubscriber({ contractId, rpcUrl, networkPassphrase });
  *
- * emitter.on('CAddressFunded', (event) => console.log(event));
- * emitter.on('FeesWithdrawn', (event) => console.log(event));
- * emitter.on('*', (event) => console.log('any event', event));
+ * // Typed specific event
+ * const unsub = sub.on('CAddressFunded', (event) => { ... });
  *
- * emitter.start();
- * // later:
- * emitter.stop();
+ * // Wildcard — receive every event
+ * const unsubAll = sub.on('*', (event) => { ... });
+ *
+ * // Stop listening
+ * unsub();
+ *
+ * // Tear down the whole subscriber (stops polling)
+ * sub.destroy();
  * ```
  */
 
-import { SorobanRpc, scValToNative } from "@stellar/stellar-sdk";
-import { withRpcRetry } from "./retry";
-import type { RpcRetryOptions } from "./retry";
+import { SorobanRpc, scValToNative } from '@stellar/stellar-sdk';
 
 // ---------------------------------------------------------------------------
-// Typed event payloads
+// Event payload types
 // ---------------------------------------------------------------------------
 
-/** Emitted by `fund_c_address` and `batch_fund_c_address` for each successfully funded target. */
+/** Emitted when a C-address is successfully funded. */
 export interface CAddressFundedEvent {
-  type: "CAddressFunded";
+  /** Contract event name */
+  name: 'CAddressFunded';
+  /** Token contract address */
   asset: string;
+  /** Source account that provided the tokens */
   source: string;
+  /** Target C-address that received the tokens */
   target: string;
+  /** Gross amount transferred */
   amount: string;
+  /** Fee deducted from the gross amount */
   fee: string;
+  /** Ledger sequence number when the event was emitted */
   ledger: number;
-  txHash: string;
-  id: string;
+  /** Paging token for cursor-based polling */
+  pagingToken: string;
 }
 
-/** Emitted when a batch item is skipped because the target is blocked/not-allowlisted. */
-export interface BatchTransferFailedEvent {
-  type: "BatchTransferFailed";
-  source: string;
-  target: string;
-  amount: string;
-  reason: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted once per `batch_fund_c_address` call after all items are processed. */
-export interface BatchCompletedEvent {
-  type: "BatchCompleted";
-  source: string;
-  numSuccess: number;
-  numFailures: number;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `fund_c_address_crosschain` after a successful cross-chain deposit. */
-export interface CrossChainFundedEvent {
-  type: "CrossChainFunded";
-  target: string;
-  chainId: number;
-  txHash: string;
-  amount: string;
-  fee: string;
-  asset: string;
-  ledger: number;
-  sorobanTxHash: string;
-  id: string;
-}
-
-/** Emitted by `withdraw_fees` after the fee collector withdraws accumulated fees. */
+/** Emitted when accumulated fees are withdrawn by the fee collector. */
 export interface FeesWithdrawnEvent {
-  type: "FeesWithdrawn";
+  name: 'FeesWithdrawn';
+  /** Fee collector address that received the fees */
   feeCollector: string;
+  /** Amount withdrawn */
   amount: string;
+  /** Token contract address */
   asset: string;
   ledger: number;
-  txHash: string;
-  id: string;
+  pagingToken: string;
 }
 
-/** Emitted by `set_admin` (immediate) or `accept_admin` (two-phase) when admin changes. */
+/** Emitted when the admin address is changed. */
 export interface AdminChangedEvent {
-  type: "AdminChanged";
+  name: 'AdminChanged';
+  /** Previous admin address */
   oldAdmin: string;
+  /** New admin address */
   newAdmin: string;
   ledger: number;
-  txHash: string;
-  id: string;
+  pagingToken: string;
 }
 
-/** Emitted by `set_fee_bps` when the global fee rate changes. */
-export interface FeeBpsChangedEvent {
-  type: "FeeBpsChanged";
-  oldFeeBps: number;
-  newFeeBps: number;
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `set_fee_collector` when the fee collector address changes. */
-export interface FeeCollectorChangedEvent {
-  type: "FeeCollectorChanged";
-  oldCollector: string;
-  newCollector: string;
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted when the contract is paused. */
-export interface ContractPausedEvent {
-  type: "ContractPaused";
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted when the contract is unpaused. */
-export interface ContractUnpausedEvent {
-  type: "ContractUnpaused";
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `execute_upgrade` or `upgrade` after a successful WASM upgrade. */
-export interface ContractUpgradedEvent {
-  type: "ContractUpgraded";
-  oldHash: string;
-  newHash: string;
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `schedule_upgrade` when an upgrade is queued. */
-export interface UpgradeScheduledEvent {
-  type: "UpgradeScheduled";
-  newWasmHash: string;
-  executableAfterLedger: number;
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `cancel_upgrade`. */
-export interface UpgradeCancelledEvent {
-  type: "UpgradeCancelled";
-  newWasmHash: string;
-  admin: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Emitted by `fund_c_address_timelocked` when a new timelock entry is created. */
-export interface TimelockCreatedEvent {
-  type: "TimelockCreated";
-  source: string;
-  target: string;
-  id: string;
-  amount: string;
-  asset: string;
-  releaseTime: string;
-  cliffTime: string;
-  ledger: number;
-  txHash: string;
-}
-
-/** Emitted by `claim_timelocked` when a mature timelock entry is claimed. */
-export interface TimelockClaimedEvent {
-  type: "TimelockClaimed";
-  target: string;
-  id: string;
-  netAmount: string;
-  fee: string;
-  asset: string;
-  ledger: number;
-  txHash: string;
-}
-
-/** Emitted by `commit_fund` when a commit-reveal commitment is created. */
-export interface CommitFundEvent {
-  type: "CommitFund";
-  source: string;
-  target: string;
-  id: string;
-  amountHash: string;
-  asset: string;
-  deadline: string;
-  ledger: number;
-  txHash: string;
-}
-
-/** Emitted by `reveal_fund` after a commit-reveal is completed. */
-export interface CommitRevealFundedEvent {
-  type: "CommitRevealFunded";
+/** Emitted when a meta-transaction fund is executed (issue #35). */
+export interface MetaFundExecutedEvent {
+  name: 'MetaFundExecuted';
   asset: string;
   source: string;
   target: string;
-  commitmentId: string;
   amount: string;
   fee: string;
+  nonce: string;
   ledger: number;
-  txHash: string;
+  pagingToken: string;
 }
 
-/** Emitted by `fund_c_address_with_swap` after a successful swap-and-fund. */
-export interface SwapAndFundedEvent {
-  type: "SwapAndFunded";
-  sourceAsset: string;
-  targetAsset: string;
-  source: string;
-  target: string;
-  sourceAmount: string;
-  receivedAmount: string;
-  fee: string;
+/** Catch-all: any contract event that is not explicitly typed. */
+export interface GenericBridgeEvent {
+  name: string;
+  /** Raw event topics decoded to native JS values */
+  topics: unknown[];
+  /** Raw event value decoded to native JS value */
+  value: unknown;
   ledger: number;
-  txHash: string;
-  id: string;
+  pagingToken: string;
 }
 
-/** Emitted by `fund_c_address` when a referral fee is paid. */
-export interface ReferralPaidEvent {
-  type: "ReferralPaid";
-  source: string;
-  referrer: string;
-  amount: string;
-  asset: string;
-  ledger: number;
-  txHash: string;
-  id: string;
-}
-
-/** Union of all typed event payloads emitted by the bridge contract. */
-export type BridgeEvent =
+/** Union of all typed event payloads. */
+export type BridgeEventPayload =
   | CAddressFundedEvent
-  | BatchTransferFailedEvent
-  | BatchCompletedEvent
-  | CrossChainFundedEvent
   | FeesWithdrawnEvent
   | AdminChangedEvent
-  | FeeBpsChangedEvent
-  | FeeCollectorChangedEvent
-  | ContractPausedEvent
-  | ContractUnpausedEvent
-  | ContractUpgradedEvent
-  | UpgradeScheduledEvent
-  | UpgradeCancelledEvent
-  | TimelockCreatedEvent
-  | TimelockClaimedEvent
-  | CommitFundEvent
-  | CommitRevealFundedEvent
-  | SwapAndFundedEvent
-  | ReferralPaidEvent;
+  | MetaFundExecutedEvent
+  | GenericBridgeEvent;
 
-/** All event type discriminants supported by `BridgeEventEmitter.on()`. */
-export type BridgeEventType = BridgeEvent["type"] | "*";
+// ---------------------------------------------------------------------------
+// Event name map
+// ---------------------------------------------------------------------------
 
-/** Listener callback — receives a strongly-typed event payload. */
-export type BridgeEventListener<T extends BridgeEvent = BridgeEvent> = (
-  event: T,
+/** Map from event name string to its typed payload type. */
+export interface BridgeEventMap {
+  CAddressFunded: CAddressFundedEvent;
+  FeesWithdrawn: FeesWithdrawnEvent;
+  AdminChanged: AdminChangedEvent;
+  MetaFundExecuted: MetaFundExecutedEvent;
+  /** Wildcard — receives every event regardless of name */
+  '*': BridgeEventPayload;
+}
+
+export type BridgeEventName = keyof BridgeEventMap;
+
+/** Callback signature for a specific event. */
+export type BridgeEventCallback<K extends BridgeEventName> = (
+  event: BridgeEventMap[K],
 ) => void;
 
+/** Cleanup function returned by `on()`. Call it to unsubscribe. */
+export type Unsubscribe = () => void;
+
 // ---------------------------------------------------------------------------
-// EventEmitter config
+// Subscriber configuration
 // ---------------------------------------------------------------------------
 
-/** Configuration for {@link BridgeEventEmitter}. */
-export interface BridgeEventEmitterConfig {
-  /** Contract ID of the deployed OnboardingBridge Soroban contract. */
+export interface EventSubscriberConfig {
+  /** The deployed OnboardingBridge contract ID (C-address). */
   contractId: string;
   /** Soroban RPC URL. */
   rpcUrl: string;
-  /** Network passphrase — must match `rpcUrl`. */
-  networkPassphrase: string;
+  /** Network passphrase — used only for RPC Server construction. */
+  networkPassphrase?: string;
   /**
-   * How often the RPC is polled for new events (milliseconds).
-   * Default: 6000 (6 s — roughly one Stellar ledger close).
+   * Polling interval in milliseconds.
+   * @default 5000
    */
-  pollIntervalMs?: number;
+  pollingIntervalMs?: number;
   /**
-   * Starting ledger sequence to fetch events from.
-   * Default: `'latest'` — only events produced after `start()` is called.
+   * Starting ledger. Pass `'now'` (default) to only see new events, or a
+   * specific ledger number to replay from that point.
+   * @default 'now'
    */
-  startLedger?: number | "latest";
-  /** Retry options forwarded to {@link withRpcRetry}. */
-  retry?: RpcRetryOptions;
+  startLedger?: number | 'now';
+  /**
+   * Maximum events to fetch per poll.
+   * @default 100
+   */
+  limit?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Raw Soroban event shape returned by getEvents()
-// ---------------------------------------------------------------------------
-
-/** Minimal shape of a raw Soroban event entry as returned by `getEvents`. */
-interface RawSorobanEvent {
-  id: string;
-  ledger: number;
-  txHash: string;
-  topic: any[];
-  value: any;
-}
-
-// ---------------------------------------------------------------------------
-// Parser helpers
-// ---------------------------------------------------------------------------
-
-/** Safely convert an ScVal to its native JS equivalent; returns undefined on failure. */
-function safeNative(scVal: any): any {
-  try {
-    return scValToNative(scVal);
-  } catch {
-    return undefined;
-  }
-}
-
-/** Convert any value to a plain string (handles BigInt, Address, number, string). */
-function toStr(v: any): string {
-  if (v === null || v === undefined) return "";
-  if (typeof v === "bigint") return v.toString();
-  if (typeof v === "number") return String(v);
-  // Soroban Address objects expose toString()
-  if (typeof v === "object" && typeof v.toString === "function")
-    return v.toString();
-  return String(v);
-}
-
-/**
- * Parse a raw Soroban event into a typed {@link BridgeEvent}.
- *
- * Soroban contract events use `env.events().publish(topics, data)`.
- * The first element of `topic` is always the event-name symbol.
- * Additional topic elements are "indexed" fields; `data` holds the rest.
- *
- * Returns `null` for unrecognised event names or malformed payloads.
- */
-function parseEvent(raw: RawSorobanEvent): BridgeEvent | null {
-  const { id, ledger, txHash, topic, value } = raw;
-
-  if (!Array.isArray(topic) || topic.length === 0) return null;
-
-  const eventName: string = safeNative(topic[0]);
-  if (typeof eventName !== "string") return null;
-
-  // data is a tuple/vec — normalise to an array for consistent indexing
-  const rawData = safeNative(value);
-  const data: any[] = Array.isArray(rawData) ? rawData : [rawData];
-
-  switch (eventName) {
-    case "CAddressFunded": {
-      // topics: [name, asset, source, target]
-      // data:   [amount, fee]
-      return {
-        type: "CAddressFunded",
-        asset: toStr(safeNative(topic[1])),
-        source: toStr(safeNative(topic[2])),
-        target: toStr(safeNative(topic[3])),
-        amount: toStr(data[0]),
-        fee: toStr(data[1]),
-        ledger,
-        txHash,
-        id,
-      } satisfies CAddressFundedEvent;
-    }
-
-    case "BatchTransferFailed": {
-      // topics: [name, source, target]
-      // data:   [amount, reason]
-      return {
-        type: "BatchTransferFailed",
-        source: toStr(safeNative(topic[1])),
-        target: toStr(safeNative(topic[2])),
-        amount: toStr(data[0]),
-        reason: toStr(data[1]),
-        ledger,
-        txHash,
-        id,
-      } satisfies BatchTransferFailedEvent;
-    }
-
-    case "BatchCompleted": {
-      // topics: [name, source]
-      // data:   [num_success, num_failures]
-      return {
-        type: "BatchCompleted",
-        source: toStr(safeNative(topic[1])),
-        numSuccess: Number(data[0] ?? 0),
-        numFailures: Number(data[1] ?? 0),
-        ledger,
-        txHash,
-        id,
-      } satisfies BatchCompletedEvent;
-    }
-
-    case "CrossChainFunded": {
-      // topics: [name, target]
-      // data:   [chain_id, tx_hash, amount, fee, asset]
-      return {
-        type: "CrossChainFunded",
-        target: toStr(safeNative(topic[1])),
-        chainId: Number(data[0] ?? 0),
-        txHash: toStr(data[1]),
-        amount: toStr(data[2]),
-        fee: toStr(data[3]),
-        asset: toStr(safeNative(data[4])),
-        ledger,
-        sorobanTxHash: txHash,
-        id,
-      } satisfies CrossChainFundedEvent;
-    }
-
-    case "FeesWithdrawn": {
-      // topics: [name, fee_collector]
-      // data:   [amount, asset]
-      return {
-        type: "FeesWithdrawn",
-        feeCollector: toStr(safeNative(topic[1])),
-        amount: toStr(data[0]),
-        asset: toStr(safeNative(data[1])),
-        ledger,
-        txHash,
-        id,
-      } satisfies FeesWithdrawnEvent;
-    }
-
-    case "AdminChanged": {
-      // topics: [name, old_admin, new_admin]
-      // data:   []
-      return {
-        type: "AdminChanged",
-        oldAdmin: toStr(safeNative(topic[1])),
-        newAdmin: toStr(safeNative(topic[2])),
-        ledger,
-        txHash,
-        id,
-      } satisfies AdminChangedEvent;
-    }
-
-    case "FeeBpsChanged": {
-      // topics: [name, old_fee_bps, new_fee_bps]
-      // data:   [admin]
-      return {
-        type: "FeeBpsChanged",
-        oldFeeBps: Number(safeNative(topic[1]) ?? 0),
-        newFeeBps: Number(safeNative(topic[2]) ?? 0),
-        admin: toStr(safeNative(data[0])),
-        ledger,
-        txHash,
-        id,
-      } satisfies FeeBpsChangedEvent;
-    }
-
-    case "FeeCollectorChanged": {
-      // topics: [name, old_collector, new_fee_collector]
-      // data:   [admin]
-      return {
-        type: "FeeCollectorChanged",
-        oldCollector: toStr(safeNative(topic[1])),
-        newCollector: toStr(safeNative(topic[2])),
-        admin: toStr(safeNative(data[0])),
-        ledger,
-        txHash,
-        id,
-      } satisfies FeeCollectorChangedEvent;
-    }
-
-    case "ContractPaused": {
-      // topics: [name]
-      // data:   [admin]
-      return {
-        type: "ContractPaused",
-        admin: toStr(safeNative(data[0])),
-        ledger,
-        txHash,
-        id,
-      } satisfies ContractPausedEvent;
-    }
-
-    case "ContractUnpaused": {
-      // topics: [name]
-      // data:   [admin]
-      return {
-        type: "ContractUnpaused",
-        admin: toStr(safeNative(data[0])),
-        ledger,
-        txHash,
-        id,
-      } satisfies ContractUnpausedEvent;
-    }
-
-    case "ContractUpgraded": {
-      // topics: [name]
-      // data:   [old_hash, new_hash, admin]
-      return {
-        type: "ContractUpgraded",
-        oldHash: toStr(data[0]),
-        newHash: toStr(data[1]),
-        admin: toStr(safeNative(data[2])),
-        ledger,
-        txHash,
-        id,
-      } satisfies ContractUpgradedEvent;
-    }
-
-    case "UpgradeScheduled": {
-      // topics: [name]
-      // data:   [new_wasm_hash, executable_after_ledger, admin]
-      return {
-        type: "UpgradeScheduled",
-        newWasmHash: toStr(data[0]),
-        executableAfterLedger: Number(data[1] ?? 0),
-        admin: toStr(safeNative(data[2])),
-        ledger,
-        txHash,
-        id,
-      } satisfies UpgradeScheduledEvent;
-    }
-
-    case "UpgradeCancelled": {
-      // topics: [name]
-      // data:   [new_wasm_hash, admin]
-      return {
-        type: "UpgradeCancelled",
-        newWasmHash: toStr(data[0]),
-        admin: toStr(safeNative(data[1])),
-        ledger,
-        txHash,
-        id,
-      } satisfies UpgradeCancelledEvent;
-    }
-
-    case "TimelockCreated": {
-      // topics: [name, source, target]
-      // data:   [id, amount, asset, release_time, cliff_time]
-      return {
-        type: "TimelockCreated",
-        source: toStr(safeNative(topic[1])),
-        target: toStr(safeNative(topic[2])),
-        id: toStr(data[0]),
-        amount: toStr(data[1]),
-        asset: toStr(safeNative(data[2])),
-        releaseTime: toStr(data[3]),
-        cliffTime: toStr(data[4]),
-        ledger,
-        txHash,
-      } satisfies TimelockCreatedEvent;
-    }
-
-    case "TimelockClaimed": {
-      // topics: [name, target]
-      // data:   [id, net_amount, fee, asset]
-      return {
-        type: "TimelockClaimed",
-        target: toStr(safeNative(topic[1])),
-        id: toStr(data[0]),
-        netAmount: toStr(data[1]),
-        fee: toStr(data[2]),
-        asset: toStr(safeNative(data[3])),
-        ledger,
-        txHash,
-      } satisfies TimelockClaimedEvent;
-    }
-
-    case "CommitFund": {
-      // topics: [name, source, target]
-      // data:   [id, amount_hash, asset, deadline]
-      return {
-        type: "CommitFund",
-        source: toStr(safeNative(topic[1])),
-        target: toStr(safeNative(topic[2])),
-        id: toStr(data[0]),
-        amountHash: toStr(data[1]),
-        asset: toStr(safeNative(data[2])),
-        deadline: toStr(data[3]),
-        ledger,
-        txHash,
-      } satisfies CommitFundEvent;
-    }
-
-    case "CommitRevealFunded": {
-      // topics: [name, asset, source, target]
-      // data:   [commitment_id, amount, fee]
-      return {
-        type: "CommitRevealFunded",
-        asset: toStr(safeNative(topic[1])),
-        source: toStr(safeNative(topic[2])),
-        target: toStr(safeNative(topic[3])),
-        commitmentId: toStr(data[0]),
-        amount: toStr(data[1]),
-        fee: toStr(data[2]),
-        ledger,
-        txHash,
-      } satisfies CommitRevealFundedEvent;
-    }
-
-    case "SwapAndFunded": {
-      // topics: [name, source_asset, target_asset, source, target]
-      // data:   [source_amount, received_amount, fee]
-      return {
-        type: "SwapAndFunded",
-        sourceAsset: toStr(safeNative(topic[1])),
-        targetAsset: toStr(safeNative(topic[2])),
-        source: toStr(safeNative(topic[3])),
-        target: toStr(safeNative(topic[4])),
-        sourceAmount: toStr(data[0]),
-        receivedAmount: toStr(data[1]),
-        fee: toStr(data[2]),
-        ledger,
-        txHash,
-        id,
-      } satisfies SwapAndFundedEvent;
-    }
-
-    case "ReferralPaid": {
-      // topics: [name, source, referrer]
-      // data:   [rf_amount, asset]
-      return {
-        type: "ReferralPaid",
-        source: toStr(safeNative(topic[1])),
-        referrer: toStr(safeNative(topic[2])),
-        amount: toStr(data[0]),
-        asset: toStr(safeNative(data[1])),
-        ledger,
-        txHash,
-        id,
-      } satisfies ReferralPaidEvent;
-    }
-
-    default:
-      return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// BridgeEventEmitter
+// EventSubscriber
 // ---------------------------------------------------------------------------
 
 /**
- * Polls the Soroban RPC for contract events and delivers typed payloads to
- * registered listeners.
+ * Polls the Soroban RPC for contract events and dispatches them to registered
+ * handlers.
  *
- * Implements a minimal EventEmitter-style API:
- * - `.on(type, listener)` — subscribe (including wildcard `'*'`)
- * - `.off(type, listener)` — unsubscribe
- * - `.once(type, listener)` — subscribe for a single delivery
- * - `.start()` — begin polling
- * - `.stop()` — cancel polling
+ * All polling happens in a `setInterval` loop. Call `destroy()` to stop it and
+ * release all listeners.
+ *
+ * @example
+ * ```ts
+ * const sub = new EventSubscriber({
+ *   contractId: 'C...',
+ *   rpcUrl: 'https://soroban-testnet.stellar.org',
+ *   pollingIntervalMs: 3000,
+ * });
+ *
+ * const unsub = sub.on('CAddressFunded', (evt) => {
+ *   console.log('Funded', evt.target, 'amount', evt.amount);
+ * });
+ *
+ * // Later…
+ * unsub();      // stop this specific listener
+ * sub.destroy(); // stop polling entirely
+ * ```
  */
-export class BridgeEventEmitter {
-  private readonly config: Required<BridgeEventEmitterConfig>;
-  private readonly provider: SorobanRpc.Server;
-  private readonly listeners: Map<string, Set<BridgeEventListener<any>>>;
-  private readonly onceListeners: Map<string, Set<BridgeEventListener<any>>>;
+export class EventSubscriber {
+  private readonly contractId: string;
+  private readonly server: SorobanRpc.Server;
+  private readonly pollingIntervalMs: number;
+  private readonly limit: number;
 
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private running = false;
-  /** The highest event id seen so far; used to avoid re-delivering events. */
-  private lastEventId = "";
-  /** Current ledger cursor for getEvents. */
-  private currentStartLedger: number | undefined;
+  /** Current cursor (paging token or ledger number). */
+  private cursor: string | number;
 
-  constructor(config: BridgeEventEmitterConfig) {
-    this.config = {
-      pollIntervalMs: config.pollIntervalMs ?? 6_000,
-      startLedger: config.startLedger ?? "latest",
-      retry: config.retry ?? {},
-      contractId: config.contractId,
-      rpcUrl: config.rpcUrl,
-      networkPassphrase: config.networkPassphrase,
-    };
-    this.provider = withRpcRetry(
-      new SorobanRpc.Server(config.rpcUrl),
-      this.config.retry,
-    );
+  /** Registry of active listeners keyed by event name (including '*'). */
+  private listeners: Map<string, Set<BridgeEventCallback<any>>>;
+
+  /** NodeJS/browser interval handle. */
+  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+
+  /** Whether destroy() has been called. */
+  private destroyed = false;
+
+  constructor(config: EventSubscriberConfig) {
+    this.contractId = config.contractId;
+    this.server = new SorobanRpc.Server(config.rpcUrl);
+    this.pollingIntervalMs = config.pollingIntervalMs ?? 5_000;
+    this.limit = config.limit ?? 100;
+    this.cursor = config.startLedger ?? 'now';
     this.listeners = new Map();
-    this.onceListeners = new Map();
-  }
-
-  /**
-   * Subscribe to a specific event type or to all events with `'*'`.
-   *
-   * @example
-   * emitter.on('CAddressFunded', (e) => console.log(e.amount));
-   * emitter.on('*', (e) => console.log(e.type));
-   */
-  on<T extends BridgeEventType>(
-    type: T,
-    listener: T extends "*"
-      ? BridgeEventListener<BridgeEvent>
-      : BridgeEventListener<Extract<BridgeEvent, { type: T }>>,
-  ): this {
-    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
-    this.listeners.get(type)!.add(listener as BridgeEventListener<any>);
-    return this;
-  }
-
-  /**
-   * Unsubscribe a previously registered listener.
-   */
-  off<T extends BridgeEventType>(
-    type: T,
-    listener: T extends "*"
-      ? BridgeEventListener<BridgeEvent>
-      : BridgeEventListener<Extract<BridgeEvent, { type: T }>>,
-  ): this {
-    this.listeners.get(type)?.delete(listener as BridgeEventListener<any>);
-    this.onceListeners.get(type)?.delete(listener as BridgeEventListener<any>);
-    return this;
-  }
-
-  /**
-   * Subscribe to exactly one delivery of an event, then auto-unsubscribe.
-   *
-   * Returns a Promise that resolves with the first matching event.
-   *
-   * @example
-   * const event = await emitter.once('FeesWithdrawn');
-   */
-  once<T extends BridgeEventType>(
-    type: T,
-    listener?: T extends "*"
-      ? BridgeEventListener<BridgeEvent>
-      : BridgeEventListener<Extract<BridgeEvent, { type: T }>>,
-  ): Promise<T extends "*" ? BridgeEvent : Extract<BridgeEvent, { type: T }>> {
-    return new Promise((resolve) => {
-      const wrapper: BridgeEventListener<any> = (event) => {
-        if (listener) (listener as any)(event);
-        this.onceListeners.get(type)?.delete(wrapper);
-        resolve(event);
-      };
-      if (!this.onceListeners.has(type))
-        this.onceListeners.set(type, new Set());
-      this.onceListeners.get(type)!.add(wrapper);
-    }) as any;
-  }
-
-  /**
-   * Start polling the RPC for new events.
-   * Calling `start()` on an already-running emitter is a no-op.
-   */
-  start(): this {
-    if (this.running) return this;
-    this.running = true;
-    void this.poll();
-    return this;
-  }
-
-  /**
-   * Stop polling and release resources.
-   */
-  stop(): this {
-    this.running = false;
-    if (this.timer !== null) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    return this;
-  }
-
-  /** Whether the emitter is currently polling. */
-  get isRunning(): boolean {
-    return this.running;
   }
 
   // -------------------------------------------------------------------------
-  // Internal polling loop
+  // Public API
   // -------------------------------------------------------------------------
 
-  private async poll(): Promise<void> {
-    if (!this.running) return;
-
-    try {
-      await this.fetchAndDispatch();
-    } catch (err: any) {
-      // Swallow poll errors — the next tick will retry.
-      // Callers can attach a listener on the special '__error' key if needed.
-      this.dispatchInternal("__error", err);
+  /**
+   * Register a listener for a specific event name or `'*'` for all events.
+   *
+   * Starts the polling loop on the first call.
+   *
+   * @returns An unsubscribe function — call it to remove this listener.
+   */
+  on<K extends BridgeEventName>(
+    eventName: K,
+    callback: BridgeEventCallback<K>,
+  ): Unsubscribe {
+    if (this.destroyed) {
+      throw new Error('EventSubscriber has been destroyed');
     }
 
-    if (this.running) {
-      this.timer = setTimeout(
-        () => void this.poll(),
-        this.config.pollIntervalMs,
-      );
+    if (!this.listeners.has(eventName)) {
+      this.listeners.set(eventName, new Set());
+    }
+    this.listeners.get(eventName)!.add(callback as BridgeEventCallback<any>);
+
+    // Auto-start polling when the first listener is registered
+    if (this.intervalHandle === null) {
+      this.startPolling();
+    }
+
+    return () => {
+      const set = this.listeners.get(eventName);
+      if (set) {
+        set.delete(callback as BridgeEventCallback<any>);
+        if (set.size === 0) {
+          this.listeners.delete(eventName);
+        }
+      }
+      // Stop polling when no listeners remain
+      if (this.listenerCount() === 0) {
+        this.stopPolling();
+      }
+    };
+  }
+
+  /**
+   * Remove all listeners for a specific event name.
+   */
+  off(eventName: BridgeEventName): void {
+    this.listeners.delete(eventName);
+    if (this.listenerCount() === 0) {
+      this.stopPolling();
+    }
+  }
+
+  /**
+   * Total number of registered callbacks across all event names.
+   */
+  listenerCount(): number {
+    let total = 0;
+    for (const set of this.listeners.values()) {
+      total += set.size;
+    }
+    return total;
+  }
+
+  /**
+   * Tear down the subscriber: stop the polling loop and remove all listeners.
+   * After calling `destroy()` this instance cannot be reused.
+   */
+  destroy(): void {
+    this.stopPolling();
+    this.listeners.clear();
+    this.destroyed = true;
+  }
+
+  /**
+   * Manually trigger a single poll. Useful in tests or for on-demand refresh.
+   */
+  async poll(): Promise<void> {
+    await this.fetchAndDispatch();
+  }
+
+  // -------------------------------------------------------------------------
+  // Polling internals
+  // -------------------------------------------------------------------------
+
+  private startPolling(): void {
+    if (this.intervalHandle !== null) return;
+    this.intervalHandle = setInterval(() => {
+      this.fetchAndDispatch().catch(() => {
+        // Swallow polling errors to keep the loop alive. Applications should
+        // add error handling via a dedicated error event if needed.
+      });
+    }, this.pollingIntervalMs);
+  }
+
+  private stopPolling(): void {
+    if (this.intervalHandle !== null) {
+      clearInterval(this.intervalHandle);
+      this.intervalHandle = null;
     }
   }
 
   private async fetchAndDispatch(): Promise<void> {
-    // Resolve 'latest' to the current ledger sequence on the first poll.
-    if (this.currentStartLedger === undefined) {
-      if (this.config.startLedger === "latest") {
-        const latest = await this.provider.getLatestLedger();
-        this.currentStartLedger = latest.sequence;
-      } else {
-        this.currentStartLedger = this.config.startLedger as number;
-      }
-    }
-
-    const response = await (this.provider as any).getEvents({
-      startLedger: this.currentStartLedger,
+    const params: SorobanRpc.Server.GetEventsRequest = {
       filters: [
         {
-          type: "contract",
-          contractIds: [this.config.contractId],
+          type: 'contract',
+          contractIds: [this.contractId],
+          topics: [['*']],
         },
       ],
-    });
+      limit: this.limit,
+    };
 
-    const rawEvents: RawSorobanEvent[] = response?.events ?? [];
-    if (rawEvents.length === 0) return;
-
-    // Advance the ledger cursor past the last received event's ledger so the
-    // next poll window starts one ledger ahead (avoids re-fetching same ledger).
-    const lastLedger = rawEvents[rawEvents.length - 1].ledger;
-    this.currentStartLedger = lastLedger + 1;
-
-    for (const raw of rawEvents) {
-      // Skip already-delivered events (safety net if RPC overlaps ledgers).
-      if (this.lastEventId && raw.id <= this.lastEventId) continue;
-
-      const parsed = parseEvent(raw);
-      if (parsed === null) continue;
-
-      this.lastEventId = raw.id;
-      this.dispatch(parsed);
+    // Attach cursor: either startLedger (number) or pagingToken (string).
+    if (typeof this.cursor === 'number') {
+      params.startLedger = this.cursor;
+    } else if (typeof this.cursor === 'string' && this.cursor !== 'now') {
+      params.cursor = this.cursor;
     }
-  }
+    // When cursor === 'now', omit both — the RPC defaults to current ledger
 
-  private dispatch(event: BridgeEvent): void {
-    // Deliver to type-specific listeners.
-    this.deliverTo(event.type, event);
-    // Deliver to wildcard listeners.
-    this.deliverTo("*", event);
-  }
+    const response = await this.server.getEvents(params);
 
-  private deliverTo(key: string, event: BridgeEvent): void {
-    const persistent = this.listeners.get(key);
-    if (persistent) {
-      for (const fn of persistent) {
-        try {
-          fn(event);
-        } catch {
-          /* individual listener errors must not break the loop */
-        }
+    for (const raw of response.events) {
+      const payload = this.parseEvent(raw);
+      if (payload) {
+        this.dispatch(payload);
       }
-    }
-    const once = this.onceListeners.get(key);
-    if (once) {
-      for (const fn of [...once]) {
-        once.delete(fn);
-        try {
-          fn(event);
-        } catch {
-          /* same */
-        }
+      // Advance cursor to the last received paging token
+      if (raw.pagingToken) {
+        this.cursor = raw.pagingToken as string;
       }
     }
   }
 
-  private dispatchInternal(key: string, payload: unknown): void {
-    const fns = this.listeners.get(key);
-    if (fns) {
-      for (const fn of fns) {
-        try {
-          fn(payload as any);
-        } catch {
-          /* ignore */
+  // -------------------------------------------------------------------------
+  // Event parsing
+  // -------------------------------------------------------------------------
+
+  private parseEvent(raw: SorobanRpc.Api.EventResponse): BridgeEventPayload | null {
+    try {
+      const topics = raw.topic.map((t) => scValToNative(t));
+      const value = scValToNative(raw.value);
+      const ledger = raw.ledger;
+      const pagingToken = raw.pagingToken;
+
+      const name = typeof topics[0] === 'string' ? topics[0] : String(topics[0]);
+
+      switch (name) {
+        case 'CAddressFunded': {
+          // topics: [name, asset, source, target]  value: [amount, fee]
+          const [amount, fee] = Array.isArray(value)
+            ? value.map(String)
+            : [String(value), '0'];
+          return {
+            name: 'CAddressFunded',
+            asset: String(topics[1] ?? ''),
+            source: String(topics[2] ?? ''),
+            target: String(topics[3] ?? ''),
+            amount,
+            fee,
+            ledger,
+            pagingToken,
+          } satisfies CAddressFundedEvent;
         }
+
+        case 'FeesWithdrawn': {
+          // topics: [name, feeCollector]  value: [amount, asset]
+          const [amount, asset] = Array.isArray(value)
+            ? value.map(String)
+            : [String(value), ''];
+          return {
+            name: 'FeesWithdrawn',
+            feeCollector: String(topics[1] ?? ''),
+            amount,
+            asset,
+            ledger,
+            pagingToken,
+          } satisfies FeesWithdrawnEvent;
+        }
+
+        case 'AdminChanged': {
+          // topics: [name, oldAdmin, newAdmin]  value: ()
+          return {
+            name: 'AdminChanged',
+            oldAdmin: String(topics[1] ?? ''),
+            newAdmin: String(topics[2] ?? ''),
+            ledger,
+            pagingToken,
+          } satisfies AdminChangedEvent;
+        }
+
+        case 'MetaFundExecuted': {
+          // topics: [name, asset, source, target]  value: [amount, fee, nonce]
+          const [amount, fee, nonce] = Array.isArray(value)
+            ? value.map(String)
+            : [String(value), '0', '0'];
+          return {
+            name: 'MetaFundExecuted',
+            asset: String(topics[1] ?? ''),
+            source: String(topics[2] ?? ''),
+            target: String(topics[3] ?? ''),
+            amount,
+            fee,
+            nonce,
+            ledger,
+            pagingToken,
+          } satisfies MetaFundExecutedEvent;
+        }
+
+        default: {
+          return {
+            name,
+            topics,
+            value,
+            ledger,
+            pagingToken,
+          } satisfies GenericBridgeEvent;
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Dispatch
+  // -------------------------------------------------------------------------
+
+  private dispatch(payload: BridgeEventPayload): void {
+    // Fire specific listeners
+    const specific = this.listeners.get(payload.name);
+    if (specific) {
+      for (const cb of specific) {
+        try { cb(payload); } catch { /* isolate handler errors */ }
+      }
+    }
+
+    // Fire wildcard listeners
+    const wildcard = this.listeners.get('*');
+    if (wildcard) {
+      for (const cb of wildcard) {
+        try { cb(payload); } catch { /* isolate handler errors */ }
       }
     }
   }
