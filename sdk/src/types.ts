@@ -1,3 +1,5 @@
+import type { RpcRetryOptions } from './retry';
+
 export interface BridgeConfig {
   /** Contract ID of the deployed OnboardingBridge Soroban contract */
   contractId: string;
@@ -7,6 +9,12 @@ export interface BridgeConfig {
   networkPassphrase: string;
   /** Optional timeout in seconds for Soroban operations */
   timeout?: number;
+  /**
+   * Automatic retry behaviour for RPC calls (exponential backoff + jitter).
+   * Omit to use the defaults (3 retries for reads, 1 for writes). Set
+   * `maxRetries: 0` to disable retries entirely.
+   */
+  retry?: RpcRetryOptions;
 }
 
 export interface FundCOptions {
