@@ -192,6 +192,7 @@ pub enum DataKey {
     // Issue #30: commit-reveal counter and entries
     CommitmentId,
     Commitment(u64),
+    MinimumAmount,
 }
 
 // ---------------------------------------------------------------------------
