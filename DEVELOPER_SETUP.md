@@ -25,7 +25,7 @@ rustup target add wasm32-unknown-unknown
 ## 1. Clone and Configure
 
 ```bash
-git clone https://github.com/chiboy948/Stellar-Raide--Contract.git
+git clone https://github.com/Stellar-Raide/Stellar-Raide--Contract.git
 cd Stellar-Raide--Contract
 cp .env.example .env
 ```
