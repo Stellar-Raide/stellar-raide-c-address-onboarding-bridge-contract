@@ -16,5 +16,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TypeScript SDK with basic functions
 - Off-ramp integration (Moonpay, Transak)
 
-[Unreleased]: https://github.com/BestBisong/Stellar-Raide--Contract/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/BestBisong/Stellar-Raide--Contract/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Stellar-Raide/Stellar-Raide--Contract/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Stellar-Raide/Stellar-Raide--Contract/releases/tag/v0.1.0
