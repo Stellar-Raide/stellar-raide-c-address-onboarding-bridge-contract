@@ -2039,8 +2039,9 @@ impl OnboardingBridge {
     /// # Errors
     ///
     /// * [`BridgeError::NotInitialized`] — Contract not yet initialised.
-    pub fn query_asset_fee_cap(_env: Env, _asset: Address) -> Result<u32, BridgeError> {
-        todo!("implement: query_asset_fee_cap")
+    pub fn query_asset_fee_cap(env: Env, asset: Address) -> Result<u32, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_asset_fee_cap(&env, &asset))
     }
 
     /// Changes the address that is entitled to call `withdraw_fees`.
@@ -2790,8 +2791,9 @@ impl OnboardingBridge {
     /// # Errors
     ///
     /// * [`BridgeError::NotInitialized`] — Contract not yet initialised.
-    pub fn query_total_bridged(_env: Env, _asset: Address) -> Result<i128, BridgeError> {
-        todo!("implement: query_total_bridged")
+    pub fn query_total_bridged(env: Env, asset: Address) -> Result<i128, BridgeError> {
+        check_initialized(&env)?;
+        Ok(read_total_bridged(&env, &asset))
     }
 
     /// Returns the cumulative gross fees collected for `asset` since deployment.
@@ -4729,8 +4731,14 @@ impl OnboardingBridge {
     /// # Errors
     ///
     /// * [`BridgeError::NotInitialized`] — Contract not yet initialised.
-    pub fn query_ttl_config(_env: Env) -> Result<(u32, u32, u32, u32), BridgeError> {
-        todo!("implement: query_ttl_config")
+    pub fn query_ttl_config(env: Env) -> Result<(u32, u32, u32, u32), BridgeError> {
+        check_initialized(&env)?;
+        Ok((
+            read_max_instance_ttl(&env),
+            read_max_persistent_ttl(&env),
+            MAX_ALLOWED_TTL,
+            CRITICAL_ENTRY_TTL_THRESHOLD,
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -4791,13 +4799,16 @@ impl OnboardingBridge {
     /// // bridge.verify_auth_entry(&source, &nonce, &seq, &(seq + 100));
     /// ```
     pub fn verify_auth_entry(
-        _env: Env,
-        _source: Address,
-        _nonce: u64,
-        _valid_after_ledger: u32,
-        _valid_before_ledger: u32,
+        env: Env,
+        source: Address,
+        nonce: u64,
+        valid_after_ledger: u32,
+        valid_before_ledger: u32,
     ) -> Result<(), BridgeError> {
-        todo!("implement: verify_auth_entry")
+        check_initialized(&env)?;
+        check_not_paused(&env)?;
+        source.require_auth();
+        consume_auth_nonce(&env, &source, nonce, valid_after_ledger, valid_before_ledger)
     }
 
     /// Returns the next unused auth nonce for `source`.
@@ -5264,7 +5275,7 @@ impl OnboardingBridge {
         }
 
         update_asset_counters(&env, &target_asset, fee, net_amount)?;
-        increment_source_bridged_volume(&env, &source, source_amount)?;
+        increment_source_bridged_volume(&env, &source, received_amount)?;
 
         mint_loyalty_tokens(&env, &source);
 
