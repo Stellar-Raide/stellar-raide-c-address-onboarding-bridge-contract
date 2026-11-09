@@ -68,7 +68,7 @@ jobs:
         run: node scripts/sign-release.js target/wasm32v1-none/release/onboarding_bridge.wasm
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             target/wasm32v1-none/release/onboarding_bridge.wasm
