@@ -905,3 +905,12 @@ MIT
 
 <!-- handsoff-issue-878 -->
 - #878: docs: API_REFERENCE.md documents a createCAddress method and CreateCOptions types that don't exist
+
+## Resolved Issues
+
+The following issues have been addressed in this release:
+
+- Added issue templates for bug reports and feature requests
+- Added contributing guidelines and CODEOWNERS
+- Improved repository documentation and onboarding
+
